@@ -1,0 +1,265 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Compile PHP Binary which can run on AWS Lambda",
+  "Parameters": {
+    "KeyName": {
+      "Description": "EC2 Instance SSH Key",
+      "Type": "AWS::EC2::KeyPair::KeyName"
+    },
+    "PhpSourceUrl": {
+      "Description": "URL of the PHP source. URL should point to a tar, tar+gzip, tar+bz2 or zip. See http://php.net/downloads.php",
+      "Type": "String",
+      "Default": "http://de2.php.net/get/php-7.2.3.tar.bz2/from/this/mirror"
+    },
+    "PhpSourceArchiveFolder": {
+      "Description": "The PHP Source archives have the source code inside a folder. give this folder name",
+      "Type": "String",
+      "Default": "php-7.2.3"
+    },
+    "InstanceType": {
+      "Description": "EC2 instance specs configuration. Free tier t2.micro will be enough",
+      "Type": "String",
+      "Default": "t2.micro",
+      "AllowedValues": [
+        "t2.micro",
+        "t2.small",
+        "t2.medium"
+      ]
+    }
+  },
+  "Mappings": {
+    "AMIs": {
+      "eu-central-1": {
+        "Name": "ami-657bd20a"
+      }
+    }
+  },
+  "Resources": {
+    "MyEbsSwap": {
+      "Type":"AWS::EC2::Volume",
+      "Properties" : {
+        "AvailabilityZone" : "eu-central-1a",
+        "Encrypted" : false,
+        "Size" : 3,
+        "Tags": [
+          {
+            "Key": "Description",
+            "Value": "SSD Swap drive for EC2 instance"
+          }
+        ],
+        "VolumeType" : "gp2"
+      }
+    },
+    "MyS3Bucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Description",
+            "Value": "S3 bucket where the compiled binary will be placed"
+          }
+        ]
+      }
+    },
+    "MyEC2Resource": {
+      "Type": "AWS::EC2::Instance",
+      "Metadata": {
+        "AWS::CloudFormation::Init": {
+          "config": {
+            "packages": {
+              "yum" : {
+                "gcc" : [],
+                "gcc-c++" : [],
+                "libxml2-devel" : []
+              }
+            },
+            "sources" : {
+              "/tmp/phpsource": {"Ref": "PhpSourceUrl"}
+            },
+            "commands": {
+              "c0100": {
+                "command": "mkswap /dev/xvdk",
+                "cwd": "/"
+              },
+              "c0200": {
+                "command": "swapon /dev/xvdk",
+                "cwd": "/"
+              },
+              "c0300": {
+                "command": "mkdir phpbin",
+                "cwd": "/tmp"
+              },
+              "c0400": {
+                "command": "./configure --prefix=/tmp/phpbin/",
+                "cwd": "/tmp/phpsource/php-7.2.3"
+              },
+              "c0500": {
+                "command": "make install",
+                "cwd": "/tmp/phpsource/php-7.2.3"
+              },
+              "c0600": {
+                "command": "tar -zcvf phpbin.tar.gz phpbin/",
+                "cwd": "/tmp"
+              },
+              "c0700": {
+                "command": { "Fn::Join" : [ "", [ "aws s3 cp ./phpbin.tar.gz s3://", {"Ref": "MyS3Bucket"}, "/phpbin.tar.gz" ] ] },
+                "cwd": "/tmp"
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "AvailabilityZone" : "eu-central-1a",
+        "InstanceType": {
+          "Ref": "InstanceType"
+        },
+        "Volumes" : [
+          { "VolumeId" : { "Ref" : "MyEbsSwap" }, "Device" : "/dev/sdk" }
+        ],
+        "ImageId": {
+          "Fn::FindInMap": [
+            "AMIs",
+            {
+              "Ref": "AWS::Region"
+            },
+            "Name"
+          ]
+        },
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "IamInstanceProfile": {
+          "Ref": "ListS3BucketsInstanceProfile"
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "SSHAccessSecurityGroup"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Description",
+            "Value": "EC2 instances for compiling PHP"
+          }
+        ],
+        "UserData"       : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash -xe\n",
+
+          "yum update -y \n",
+          "yum install -y aws-cfn-bootstrap\n",
+
+          "/opt/aws/bin/cfn-init -v ",
+          "         --stack ", { "Ref" : "AWS::StackName" },
+          "         --resource MyEC2Resource ",
+          "         --region ", { "Ref" : "AWS::Region" }, "\n",
+
+          "/opt/aws/bin/cfn-signal -e $? ",
+          "         --stack ", { "Ref" : "AWS::StackName" },
+          "         --resource MyEC2Resource ",
+          "         --region ", { "Ref" : "AWS::Region" }, "\n"
+        ]]}}
+      }
+    },
+    "SSHAccessSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Allow SSH access from anywhere",
+        "SecurityGroupIngress": [
+          {
+            "FromPort": "22",
+            "ToPort": "22",
+            "IpProtocol": "tcp",
+            "CidrIp": "0.0.0.0/0"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "SSHAccessSecurityGroup"
+          }
+        ]
+      }
+    },
+    "ListS3BucketsInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "MyRole"
+          }
+        ]
+      }
+    },
+    "MyPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "MyPolicy",
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:*"
+              ],
+              "Resource": "*"
+            }
+          ]
+        },
+        "Roles": [
+          {
+            "Ref": "MyRole"
+          }
+        ]
+      }
+    },
+    "MyRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/"
+      }
+    }
+  },
+  "Outputs": {
+    "EC2": {
+      "Description": "EC2 IP address",
+      "Value": {
+        "Fn::Join": ["", ["ssh ec2-user@",
+            {
+              "Fn::GetAtt": [
+                "MyEC2Resource",
+                "PublicIp"
+              ]
+            },
+            " -i ",
+            {
+              "Ref": "KeyName"
+            },
+            ".pem"
+          ]
+        ]
+      }
+    },
+    "BucketUrl": {
+      "Description": "URL of the S3 bucket where the complied binary has been placed",
+      "Value": {"Fn::GetAtt": ["MyS3Bucket", "WebsiteURL"]}
+    }
+  }
+}
