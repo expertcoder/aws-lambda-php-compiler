@@ -21,8 +21,13 @@ https://aws.amazon.com/blogs/compute/scripting-languages-for-aws-lambda-running-
 
 1. run `aws configure`
 
-1. run cloudformation using the provided template .......
+1. create a SSH key in AWS (In same region as the new EC2 instance about to be created)
 
+1. run Cloudformation `aws cloudformation deploy --template-file template.json --stack-name stackname --capabilities CAPABILITY_IAM --parameter-overrides KeyName=test`
+
+1. Wait several minutes for the compile to complete and the file to end up in the S3 bucket
+
+1. destroy the Cloudformation stack
 
 ### Approach Details
 
